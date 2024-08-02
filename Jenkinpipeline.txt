@@ -1,0 +1,39 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION = 'us-east-1' // Change to your AWS region
+        STACK_NAME = 'LambdaDeploymentStack'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                // Checkout your Lambda function code from your source control
+                checkout scm
+            }
+        }
+
+        stage('Deploy CloudFormation Stack') {
+            steps {
+                script {
+                    // Deploy the CloudFormation stack
+                    withAWS(region: "${env.AWS_REGION}") {
+                        sh """
+                        aws cloudformation deploy \
+                            --template-file template.yaml \
+                            --stack-name ${env.STACK_NAME} \
+                            --capabilities CAPABILITY_NAMED_IAM
+                        """
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            cleanWs()
+        }
+    }
+}
