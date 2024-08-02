@@ -1,1 +1,143 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Resources:
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: 'LambdaExecutionPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'logs:*'
+                  - 'ec2:DescribeImages'
+                  - 'ec2:RunInstances'
+                  - 'ec2:CreateTags'
+                  - 's3:CreateBucket'
+                  - 's3:PutObject'
+                Resource: '*'
 
+  LambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: 'index.lambda_handler'
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import time
+
+          ec2_client = boto3.client('ec2')
+          s3_client = boto3.client('s3')
+
+          VPC_ID = 'vpc-xxxxxxxx'  # Replace with your actual VPC ID
+          SUBNET_ID = 'subnet-xxxxxxxx'  # Replace with your actual Subnet ID
+          SECURITY_GROUP_ID = 'sg-xxxxxxxx'  # Replace with your actual Security Group ID
+          YOUR_NAME = 'yourname'  # Replace 'yourname' with your actual name or identifier
+
+          def get_latest_ecs_ami():
+              response = ec2_client.describe_images(
+                  Owners=['amazon'],
+                  Filters=[
+                      {'Name': 'name', 'Values': ['amzn2-ami-ecs-hvm-*-x86_64-ebs']},
+                      {'Name': 'state', 'Values': ['available']}
+                  ]
+              )
+              images = response['Images']
+              latest_image = max(images, key=lambda x: x['CreationDate'])
+              return latest_image['ImageId']
+
+          def create_ec2_instances(ami_id):
+              instance_ids = []
+              for i in range(1, 11):
+                  instance_name = f'myinstance{i}'
+                  try:
+                      response = ec2_client.run_instances(
+                          ImageId=ami_id,
+                          InstanceType='t3.micro',
+                          MaxCount=1,
+                          MinCount=1,
+                          TagSpecifications=[
+                              {
+                                  'ResourceType': 'instance',
+                                  'Tags': [{'Key': 'Name', 'Value': instance_name}]
+                              }
+                          ],
+                          NetworkInterfaces=[
+                              {
+                                  'AssociatePublicIpAddress': True,
+                                  'DeviceIndex': 0,
+                                  'SubnetId': SUBNET_ID,
+                                  'Groups': [SECURITY_GROUP_ID]
+                              }
+                          ]
+                      )
+                      instance_id = response['Instances'][0]['InstanceId']
+                      instance_ids.append(instance_id)
+                      print(f'Created instance {instance_name} with ID {instance_id}')
+                  except Exception as e:
+                      print(f"Error creating instance {instance_name}: {e}")
+                      continue
+              return instance_ids
+
+          def create_s3_buckets_and_upload_ids(instance_ids):
+              for i, instance_id in enumerate(instance_ids, start=1):
+                  bucket_name = f'{YOUR_NAME}-mys3bucket{i}'
+                  try:
+                      s3_client.create_bucket(Bucket=bucket_name)
+                      print(f'Created S3 bucket: {bucket_name}')
+                      
+                      file_name = f'instance{i}_id.txt'
+                      with open(f'/tmp/{file_name}', 'w') as file:
+                          file.write(instance_id)
+                      
+                      s3_client.upload_file(f'/tmp/{file_name}', bucket_name, file_name)
+                      print(f'Uploaded instance ID {instance_id} to {bucket_name}/{file_name}')
+                  except Exception as e:
+                      print(f"Error creating bucket or uploading file to {bucket_name}: {e}")
+
+          def lambda_handler(event, context):
+              try:
+                  ami_id = get_latest_ecs_ami()
+                  instance_ids = create_ec2_instances(ami_id)
+                  if not instance_ids:
+                      raise Exception("No EC2 instances were created.")
+                  time.sleep(60)  # Wait for instances to be ready
+                  create_s3_buckets_and_upload_ids(instance_ids)
+                  return {
+                      'statusCode': 200,
+                      'body': 'Successfully created EC2 instances and S3 buckets.'
+                  }
+              except Exception as e:
+                  print(f"Error in lambda_handler: {e}")
+                  return {
+                      'statusCode': 500,
+                      'body': f'Error: {e}'
+                  }
+      Runtime: 'python3.8'
+      Timeout: 300
+
+  LambdaInvokePermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt LambdaFunction.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: 'events.amazonaws.com'
+      SourceArn: !GetAtt LambdaCloudWatchRule.Arn
+
+  LambdaCloudWatchRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      ScheduleExpression: 'cron(0 9 ? * MON *)'
+      State: 'ENABLED'
+      Targets:
+        - Arn: !GetAtt LambdaFunction.Arn
+          Id: 'LambdaFunctionTarget'
